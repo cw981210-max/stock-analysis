@@ -193,6 +193,7 @@ const apiKeyPlaceholder = computed(() => {
   const map = {
     openai: 'sk-...',
     deepseek: 'sk-...',
+    claude: 'sk-ant-...',
     kimi: 'sk-...',
     glm: 'xxxxxxxx.xxxxxxxx',
   }

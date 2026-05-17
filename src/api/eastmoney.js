@@ -341,14 +341,45 @@ export async function fetchMarketFundFlow() {
   }
 }
 
-// 获取市场热门股票实时行情 + 全市场ETF + 可转债
+// 获取全A股实时行情（使用clist API，一次性获取所有A股实时价格）
+async function fetchAllAShareQuotes() {
+  const results = []
+  const pageSize = 3000
+  try {
+    const pages = await Promise.all([
+      emJsonp(`https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=${pageSize}&po=1&np=1&fltt=2&invt=2&fid=f6&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23&fields=f2,f3,f6,f9,f12,f14`).catch(() => null),
+      emJsonp(`https://push2.eastmoney.com/api/qt/clist/get?pn=2&pz=${pageSize}&po=1&np=1&fltt=2&invt=2&fid=f6&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23&fields=f2,f3,f6,f9,f12,f14`).catch(() => null),
+    ])
+    for (const data of pages) {
+      const list = data?.data?.diff
+      if (!list || !Array.isArray(list)) continue
+      for (const item of list) {
+        if (item.f2 === '-' || !item.f2 || item.f2 <= 0) continue
+        results.push({
+          code: String(item.f12),
+          name: item.f14,
+          price: item.f2,
+          changePercent: item.f3,
+          pe: item.f9,
+          volume: item.f6,
+        })
+      }
+    }
+  } catch (e) {
+    console.error('全A股行情获取失败:', e)
+  }
+  return results
+}
+
+// 获取市场热门股票实时行情 + 全市场ETF + 可转债 + 全A股价格速查表
 export async function fetchHotStockQuotes() {
   try {
-    // 并行获取：机构评级股票、全市场ETF、可转债
-    const [allList, etfResp, cbResp] = await Promise.all([
+    // 并行获取：机构评级股票、全市场ETF、可转债、全A股实时行情
+    const [allList, etfResp, cbResp, allAShares] = await Promise.all([
       dcFetch('RPT_WEB_RESPREDICT', null, 3000, 'RATING_ORG_NUM', -1),
-      emJsonp(`https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=500&po=1&np=1&fltt=2&invt=2&fid=f6&fs=b:MK0022&fields=f2,f3,f6,f12,f14`).catch(() => null),
-      emJsonp(`https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=300&po=1&np=1&fltt=2&invt=2&fid=f6&fs=b:MK0021&fields=f2,f3,f6,f12,f14`).catch(() => null),
+      emJsonp(`https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=1000&po=1&np=1&fltt=2&invt=2&fid=f6&fs=b:MK0022&fields=f2,f3,f6,f12,f14`).catch(() => null),
+      emJsonp(`https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=500&po=1&np=1&fltt=2&invt=2&fid=f6&fs=b:MK0021&fields=f2,f3,f6,f12,f14`).catch(() => null),
+      fetchAllAShareQuotes(),
     ])
 
     // 处理ETF数据（clist API已含实时价格）
@@ -415,9 +446,24 @@ export async function fetchHotStockQuotes() {
       }
     }
 
-    return [...stockQuotes, ...etfs, ...cbs]
+    // 构建全量价格速查表（用于AI推荐后自动补充实时价格）
+    const priceLookup = new Map()
+    for (const item of allAShares) {
+      priceLookup.set(item.code, { price: item.price, name: item.name, changePercent: item.changePercent, pe: item.pe })
+    }
+    for (const etf of etfs) {
+      priceLookup.set(etf.code, { price: etf.price, name: etf.name, changePercent: etf.changePercent })
+    }
+    for (const cb of cbs) {
+      priceLookup.set(cb.code, { price: cb.price, name: cb.name, changePercent: cb.changePercent })
+    }
+    for (const sq of stockQuotes) {
+      priceLookup.set(sq.code, { price: sq.price, name: sq.name, changePercent: sq.changePercent, pe: sq.pe })
+    }
+
+    return { hotStocks: [...stockQuotes, ...etfs, ...cbs], priceLookup }
   } catch (e) {
     console.error('热门股票行情获取失败:', e)
-    return []
+    return { hotStocks: [], priceLookup: new Map() }
   }
 }

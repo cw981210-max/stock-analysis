@@ -3,6 +3,7 @@ export const PROVIDERS = [
     id: 'openai',
     name: 'OpenAI',
     baseUrl: 'https://api.openai.com/v1/chat/completions',
+    format: 'openai',
     models: [
       { id: 'gpt-4o-mini', name: 'GPT-4o Mini' },
       { id: 'gpt-4o', name: 'GPT-4o' },
@@ -13,6 +14,7 @@ export const PROVIDERS = [
     id: 'deepseek',
     name: 'DeepSeek',
     baseUrl: 'https://api.deepseek.com/v1/chat/completions',
+    format: 'openai',
     models: [
       { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash (推荐)' },
       { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro (旗舰)' },
@@ -21,9 +23,21 @@ export const PROVIDERS = [
     ],
   },
   {
+    id: 'claude',
+    name: 'Claude (Anthropic)',
+    baseUrl: 'https://api.anthropic.com/v1/messages',
+    format: 'anthropic',
+    models: [
+      { id: 'claude-opus-4-7', name: 'Claude Opus 4.7 (旗舰)' },
+      { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6 (推荐)' },
+      { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5 (极速)' },
+    ],
+  },
+  {
     id: 'kimi',
     name: 'Kimi (月之暗面)',
     baseUrl: 'https://api.moonshot.cn/v1/chat/completions',
+    format: 'openai',
     models: [
       { id: 'kimi-k2.6', name: 'Kimi K2.6 (最新)' },
       { id: 'kimi-k2.5', name: 'Kimi K2.5 (推荐)' },
@@ -37,6 +51,7 @@ export const PROVIDERS = [
     id: 'glm',
     name: 'GLM (智谱清言)',
     baseUrl: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
+    format: 'openai',
     models: [
       { id: 'glm-4-plus', name: 'GLM-4 Plus (旗舰)' },
       { id: 'glm-4-air-250414', name: 'GLM-4 Air (性价比)' },
@@ -59,47 +74,66 @@ export function getProviderModels(providerId) {
   return getProvider(providerId).models
 }
 
+const SYSTEM_PROMPT = '你是一位专业的A股投资分析师。请基于提供的数据进行客观、全面的投资分析。所有分析必须结合具体数据给出判断。请使用 Markdown 格式输出。'
+
 export async function streamAnalysis(prompt, apiKey, providerId = 'openai', model = 'gpt-4o-mini', onChunk) {
   if (!apiKey) {
     throw new Error('请先在设置中配置 API Key')
   }
 
   const provider = getProvider(providerId)
+  const isAnthropic = provider.format === 'anthropic'
 
-  // 尝试直连，如果 CORS 失败自动尝试常见代理
-  const proxyUrls = [
-    provider.baseUrl,
-  ]
-
-  // 如果用户配置了自定义代理地址（在 localStorage 中）
+  // 构建请求 URL 列表（自定义代理优先）
+  const urls = []
   const customProxy = localStorage.getItem('stockai_proxy')
   if (customProxy) {
-    proxyUrls.unshift(customProxy + '/v1/chat/completions')
+    const basePath = isAnthropic ? '/v1/messages' : '/v1/chat/completions'
+    urls.push(customProxy + basePath)
+  }
+  urls.push(provider.baseUrl)
+
+  // 构建请求头
+  const headers = { 'Content-Type': 'application/json' }
+  if (isAnthropic) {
+    headers['x-api-key'] = apiKey
+    headers['anthropic-version'] = '2023-06-01'
+    headers['anthropic-dangerous-direct-browser-access'] = 'true'
+  } else {
+    headers['Authorization'] = `Bearer ${apiKey}`
+  }
+
+  // 构建请求体
+  let body
+  if (isAnthropic) {
+    body = {
+      model,
+      max_tokens: 8192,
+      system: SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: prompt }],
+      stream: true,
+    }
+  } else {
+    body = {
+      model,
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: prompt },
+      ],
+      stream: true,
+      temperature: providerId === 'kimi' ? 1 : 0.7,
+    }
   }
 
   let lastError = null
 
-  for (const url of proxyUrls) {
+  for (const url of urls) {
     try {
       console.log('[StockAI] 请求API:', url, 'model:', model)
       const response = await fetch(url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            {
-              role: 'system',
-              content: '你是一位专业的A股投资分析师。请基于提供的数据进行客观、全面的投资分析。所有分析必须结合具体数据给出判断。请使用 Markdown 格式输出。',
-            },
-            { role: 'user', content: prompt },
-          ],
-          stream: true,
-          temperature: providerId === 'kimi' ? 1 : 0.7,
-        }),
+        headers,
+        body: JSON.stringify(body),
       })
 
       if (!response.ok) {
@@ -115,7 +149,9 @@ export async function streamAnalysis(prompt, apiKey, providerId = 'openai', mode
 
       // 成功连接，开始流式读取
       console.log('[StockAI] API连接成功，开始读取流')
-      return await readStream(response, onChunk)
+      return isAnthropic
+        ? await readAnthropicStream(response, onChunk)
+        : await readStream(response, onChunk)
 
     } catch (e) {
       lastError = e
@@ -139,6 +175,37 @@ export async function streamAnalysis(prompt, apiKey, providerId = 'openai', mode
     )
   }
   throw lastError
+}
+
+async function readAnthropicStream(response, onChunk) {
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let fullText = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() || ''
+
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed.startsWith('data: ')) continue
+      const payload = trimmed.slice(6)
+      try {
+        const json = JSON.parse(payload)
+        if (json.type === 'content_block_delta' && json.delta?.type === 'text_delta') {
+          fullText += json.delta.text
+          onChunk(fullText)
+        }
+      } catch { /* skip */ }
+    }
+  }
+
+  return fullText
 }
 
 async function readStream(response, onChunk) {

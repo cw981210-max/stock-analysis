@@ -167,9 +167,9 @@ async function onSmartRecommend(preferences) {
     return
   }
   try {
-    // 获取热门股票实时行情
-    const hotStocks = await fetchHotStockQuotes()
-    await recommend(preferences, apiKey.value, provider.value, model.value, marketIndices.value, marketFundFlow.value, hotStocks)
+    // 获取热门股票实时行情 + 全市场价格速查表
+    const { hotStocks, priceLookup } = await fetchHotStockQuotes()
+    await recommend(preferences, apiKey.value, provider.value, model.value, marketIndices.value, marketFundFlow.value, hotStocks, priceLookup)
   } catch (e) {
     console.error('[StockAI] 智能荐股失败:', e)
   }
