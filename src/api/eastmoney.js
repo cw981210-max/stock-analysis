@@ -347,8 +347,9 @@ async function fetchAllAShareQuotes() {
   const pageSize = 3000
   try {
     const pages = await Promise.all([
-      emJsonp(`https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=${pageSize}&po=1&np=1&fltt=2&invt=2&fid=f6&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23&fields=f2,f3,f6,f9,f12,f14`).catch(() => null),
-      emJsonp(`https://push2.eastmoney.com/api/qt/clist/get?pn=2&pz=${pageSize}&po=1&np=1&fltt=2&invt=2&fid=f6&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23&fields=f2,f3,f6,f9,f12,f14`).catch(() => null),
+      emJsonp(`https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=${pageSize}&po=1&np=1&fltt=2&invt=2&fid=f6&fs=m:0+t:6,m:0+t:80,m:0+t:81,m:1+t:2,m:1+t:23&fields=f2,f3,f6,f9,f12,f14`).catch(() => null),
+      emJsonp(`https://push2.eastmoney.com/api/qt/clist/get?pn=2&pz=${pageSize}&po=1&np=1&fltt=2&invt=2&fid=f6&fs=m:0+t:6,m:0+t:80,m:0+t:81,m:1+t:2,m:1+t:23&fields=f2,f3,f6,f9,f12,f14`).catch(() => null),
+      emJsonp(`https://push2.eastmoney.com/api/qt/clist/get?pn=3&pz=${pageSize}&po=1&np=1&fltt=2&invt=2&fid=f6&fs=m:0+t:6,m:0+t:80,m:0+t:81,m:1+t:2,m:1+t:23&fields=f2,f3,f6,f9,f12,f14`).catch(() => null),
     ])
     for (const data of pages) {
       const list = data?.data?.diff
@@ -371,14 +372,53 @@ async function fetchAllAShareQuotes() {
   return results
 }
 
-// 获取市场热门股票实时行情 + 全市场ETF + 可转债 + 全A股价格速查表
+// 按需获取任意股票/基金代码的实时行情（用于AI推荐后补充缺失价格）
+export async function fetchRealtimeQuotesByCodes(codes) {
+  if (!codes || codes.length === 0) return new Map()
+
+  function getSecid(code) {
+    const c = String(code)
+    if (c.startsWith('6') || c.startsWith('5') || c.startsWith('11')) return `1.${c}`
+    return `0.${c}`
+  }
+
+  const results = new Map()
+  const batchSize = 50
+
+  for (let i = 0; i < codes.length; i += batchSize) {
+    const batch = codes.slice(i, i + batchSize)
+    const secids = batch.map(c => getSecid(c)).join(',')
+    const url = `https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&fields=f2,f3,f6,f9,f12,f14&secids=${secids}`
+    try {
+      const data = await emJsonp(url)
+      const list = data?.data?.diff
+      if (!list || !Array.isArray(list)) continue
+      for (const item of list) {
+        if (item.f2 === '-' || !item.f2 || item.f2 <= 0) continue
+        results.set(String(item.f12), {
+          price: item.f2,
+          name: item.f14,
+          changePercent: item.f3,
+          pe: item.f9,
+        })
+      }
+    } catch (e) {
+      console.error('按需行情获取失败:', e)
+    }
+  }
+
+  return results
+}
+
+// 获取市场热门股票实时行情 + 全市场ETF + 可转债 + LOF基金 + 全A股价格速查表
 export async function fetchHotStockQuotes() {
   try {
     // 并行获取：机构评级股票、全市场ETF、可转债、全A股实时行情
-    const [allList, etfResp, cbResp, allAShares] = await Promise.all([
+    const [allList, etfResp, cbResp, lofResp, allAShares] = await Promise.all([
       dcFetch('RPT_WEB_RESPREDICT', null, 3000, 'RATING_ORG_NUM', -1),
       emJsonp(`https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=1000&po=1&np=1&fltt=2&invt=2&fid=f6&fs=b:MK0022&fields=f2,f3,f6,f12,f14`).catch(() => null),
       emJsonp(`https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=500&po=1&np=1&fltt=2&invt=2&fid=f6&fs=b:MK0021&fields=f2,f3,f6,f12,f14`).catch(() => null),
+      emJsonp(`https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=500&po=1&np=1&fltt=2&invt=2&fid=f6&fs=b:MK0023&fields=f2,f3,f6,f12,f14`).catch(() => null),
       fetchAllAShareQuotes(),
     ])
 
@@ -410,6 +450,22 @@ export async function fetchHotStockQuotes() {
           changePercent: item.f3,
           volume: item.f6,
           type: '可转债',
+        })
+      }
+    }
+
+    // 处理LOF基金数据（clist API已含实时价格）
+    const lofs = []
+    if (lofResp?.data?.diff) {
+      for (const item of lofResp.data.diff) {
+        if (item.f2 === '-' || !item.f2 || item.f2 <= 0) continue
+        lofs.push({
+          code: String(item.f12),
+          name: item.f14,
+          price: item.f2,
+          changePercent: item.f3,
+          volume: item.f6,
+          type: 'LOF',
         })
       }
     }
@@ -457,11 +513,14 @@ export async function fetchHotStockQuotes() {
     for (const cb of cbs) {
       priceLookup.set(cb.code, { price: cb.price, name: cb.name, changePercent: cb.changePercent })
     }
+    for (const lof of lofs) {
+      priceLookup.set(lof.code, { price: lof.price, name: lof.name, changePercent: lof.changePercent })
+    }
     for (const sq of stockQuotes) {
       priceLookup.set(sq.code, { price: sq.price, name: sq.name, changePercent: sq.changePercent, pe: sq.pe })
     }
 
-    return { hotStocks: [...stockQuotes, ...etfs, ...cbs], priceLookup }
+    return { hotStocks: [...stockQuotes, ...etfs, ...cbs, ...lofs], priceLookup }
   } catch (e) {
     console.error('热门股票行情获取失败:', e)
     return { hotStocks: [], priceLookup: new Map() }

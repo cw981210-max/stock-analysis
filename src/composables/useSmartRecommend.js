@@ -1,12 +1,32 @@
 import { ref } from 'vue'
 import { streamAnalysis } from '../api/openai.js'
+import { fetchRealtimeQuotesByCodes } from '../api/eastmoney.js'
 import MarkdownIt from 'markdown-it'
 
 const md = new MarkdownIt({ html: false, breaks: true })
 
-// AI推荐完成后，对"当前参考价/当前净值"等行注入实时价格
-function postProcessRecommendation(text, priceLookup) {
+// AI推荐完成后，对"当前参考价/当前净值"等行注入实时价格（含按需获取缺失品种行情）
+async function postProcessRecommendation(text, priceLookup) {
   if (!priceLookup || priceLookup.size === 0) return text
+
+  // Step 0: 提取AI回复中所有品种代码，对priceLookup中没有的按需获取实时行情
+  const extractRegex = /(?<!\d)(6\d{5}|0\d{5}|3\d{5}|5\d{5}|8\d{5}|4\d{5}|1\d{5})(?!\d)/g
+  const mentionedCodes = new Set()
+  let m
+  while ((m = extractRegex.exec(text)) !== null) {
+    mentionedCodes.add(m[1])
+  }
+  const missingCodes = [...mentionedCodes].filter(code => !priceLookup.has(code))
+  if (missingCodes.length > 0) {
+    try {
+      const onDemandPrices = await fetchRealtimeQuotesByCodes(missingCodes)
+      for (const [code, info] of onDemandPrices) {
+        priceLookup.set(code, info)
+      }
+    } catch (e) {
+      console.error('按需行情补充失败:', e)
+    }
+  }
 
   // Step 1: 找到所有价格标签行（兼容"当前参考价"、"当前净值"、"当前价格"等各种变体）
   const priceLineRegex = /(\*{0,2}(?:当前参考价|当前净值|当前价格|最新价|当前市价|参考价格|参考净值)\*{0,2}\s*[：:]\s*)([^\n]+)/g
@@ -21,7 +41,7 @@ function postProcessRecommendation(text, priceLookup) {
     // 向上1000字符范围内查找最近的6位股票/ETF代码
     const searchStart = Math.max(0, priceMatch.index - 1000)
     const beforeText = text.slice(searchStart, priceMatch.index)
-    const codeMatches = beforeText.match(/(?<!\d)(6\d{5}|0\d{5}|3\d{5}|5\d{5}|8\d{5}|4\d{5})(?!\d)/g)
+    const codeMatches = beforeText.match(/(?<!\d)(6\d{5}|0\d{5}|3\d{5}|5\d{5}|8\d{5}|4\d{5}|1\d{5})(?!\d)/g)
     if (!codeMatches || codeMatches.length === 0) continue
 
     // 从最近的代码开始，找到第一个有价格的
@@ -66,7 +86,7 @@ function postProcessRecommendation(text, priceLookup) {
   }
 
   // Step 3: 收集所有推荐品种代码，在末尾追加实时价格参考表
-  const codeRegex = /(?<!\d)(6\d{5}|0\d{5}|3\d{5}|5\d{5}|8\d{5}|4\d{5})(?!\d)/g
+  const codeRegex = /(?<!\d)(6\d{5}|0\d{5}|3\d{5}|5\d{5}|8\d{5}|4\d{5}|1\d{5})(?!\d)/g
   const codes = new Set()
   let match
   while ((match = codeRegex.exec(text)) !== null) {
@@ -190,6 +210,13 @@ export function useSmartRecommend() {
             `${s.code} | ${s.name} | ${s.price} | ${s.changePercent > 0 ? '+' : ''}${s.changePercent?.toFixed(2)}%`
           ).join('\n')
       }
+      const lofs = hotStocks.filter(s => s.type === 'LOF')
+      if (lofs.length) {
+        str += `\n\n【LOF基金（${lofs.length}只，含实时价格）】\n代码 | 名称 | 当前价 | 涨跌幅\n` +
+          lofs.map(s =>
+            `${s.code} | ${s.name} | ${s.price} | ${s.changePercent > 0 ? '+' : ''}${s.changePercent?.toFixed(2)}%`
+          ).join('\n')
+      }
       hotStocksStr = str || '暂无数据'
     }
 
@@ -200,7 +227,7 @@ export function useSmartRecommend() {
       const entries = []
       for (const [code, info] of priceLookup) {
         if (existingCodes.has(code)) continue
-        if (entries.length >= 2000) break
+        if (entries.length >= 5000) break
         entries.push(`${code}:${info.price}(${info.changePercent > 0 ? '+' : ''}${info.changePercent?.toFixed(2)}%)`)
       }
       if (entries.length > 0) {
@@ -292,7 +319,7 @@ ${hotStocksStr}${compactPriceStr}
 
       // AI推荐完成后，自动补充推荐品种的实时价格（兜底）
       if (priceLookup && recommendation.value) {
-        const processed = postProcessRecommendation(recommendation.value, priceLookup)
+        const processed = await postProcessRecommendation(recommendation.value, priceLookup)
         recommendation.value = processed
         htmlRecommendation.value = md.render(processed)
       }
